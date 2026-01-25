@@ -5,12 +5,14 @@ Tests scraping of a single player (Lionel Messi)
 import asyncio
 import json
 import sys
+import random
 from pathlib import Path
 
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 from player_scraper import PlayerScraper
 
 
@@ -25,43 +27,79 @@ async def test_single_player():
     print("\nStarting browser...")
     
     async with async_playwright() as p:
+        # Enhanced browser launch with comprehensive anti-detection
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
                 '--no-sandbox',
-                '--disable-setuid-sandbox'
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-infobars',
+                '--window-size=1920,1080',
+                '--start-maximized',
+                '--disable-extensions',
+                '--disable-gpu',
+                '--disable-notifications'
             ]
         )
         
+        # More realistic user agent
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        ]
+        
         context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            user_agent=random.choice(user_agents),
             viewport={'width': 1920, 'height': 1080},
             locale='en-US',
             timezone_id='America/New_York',
+            permissions=['geolocation'],
+            geolocation={'latitude': 40.7128, 'longitude': -74.0060},
             extra_http_headers={
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none'
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"'
             }
         )
         
         page = await context.new_page()
         
+        # Apply stealth mode to evade detection
+        stealth = Stealth()
+        await stealth.apply_stealth_async(page)
+        
         # Block images, stylesheets, fonts to optimize loading
         await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
         
         print("Navigating to player page...")
-        await page.goto(test_url, wait_until="domcontentloaded", timeout=15000)
-        await page.wait_for_timeout(2000)
+        await page.goto(test_url, wait_until="networkidle", timeout=30000)
+        
+        # Human-like delay
+        await page.wait_for_timeout(random.randint(2000, 4000))
         
         # Check for Cloudflare challenge
         page_content = await page.content()
-        if 'Checking your browser' in page_content or 'Just a moment' in page_content:
-            print("⚠ Cloudflare challenge detected - test may fail")
+        if 'Checking your browser' in page_content or 'Just a moment' in page_content or 'challenge-platform' in page_content:
+            print("⚠ Cloudflare challenge detected, waiting for resolution...")
+            await page.wait_for_timeout(10000)
+            page_content = await page.content()
+            if 'Checking your browser' in page_content or 'Just a moment' in page_content:
+                print("⚠ Cloudflare challenge still present - test may fail")
+        else:
+            print("✓ No Cloudflare challenge detected")
         
         print("Extracting player data...")
         player_data = await PlayerScraper.scrape_player_data(page, test_url)

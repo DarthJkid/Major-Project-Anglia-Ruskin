@@ -4,7 +4,9 @@ Scrapes all player URLs from sofifa.com paginated list
 """
 import csv
 import asyncio
+import random
 from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 
 
 class PlayerURLScraper:
@@ -17,31 +19,60 @@ class PlayerURLScraper:
     async def scrape_all_player_urls(self):
         """Scrape all player URLs from paginated list"""
         async with async_playwright() as p:
+            # Enhanced browser launch with comprehensive anti-detection
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--disable-dev-shm-usage',
                     '--no-sandbox',
-                    '--disable-setuid-sandbox'
+                    '--disable-setuid-sandbox',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-infobars',
+                    '--window-size=1920,1080',
+                    '--start-maximized',
+                    '--disable-extensions',
+                    '--disable-gpu',
+                    '--disable-notifications'
                 ]
             )
             
+            # More realistic user agent (latest Chrome)
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            ]
+            
             context = await browser.new_context(
-                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                user_agent=random.choice(user_agents),
                 viewport={'width': 1920, 'height': 1080},
                 locale='en-US',
                 timezone_id='America/New_York',
+                permissions=['geolocation'],
+                geolocation={'latitude': 40.7128, 'longitude': -74.0060},
                 extra_http_headers={
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
                     'Sec-Fetch-Dest': 'document',
                     'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none'
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"Windows"'
                 }
             )
             
             page = await context.new_page()
+            
+            # Apply stealth mode to evade detection
+            stealth = Stealth()
+            await stealth.apply_stealth_async(page)
             
             # Block images, stylesheets, fonts to optimize loading
             await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
@@ -59,20 +90,36 @@ class PlayerURLScraper:
                 while retries < max_retries and not success:
                     try:
                         if retries > 0:
-                            print(f"  Retry {retries}/{max_retries} after 10s pause...")
-                            await asyncio.sleep(10)
+                            # Exponential backoff with random jitter
+                            delay = (2 ** retries) + random.uniform(1, 5)
+                            print(f"  Retry {retries}/{max_retries} after {delay:.1f}s pause...")
+                            await asyncio.sleep(delay)
+                        
+                        # Random delay between requests (1-3 seconds)
+                        if page_num > 1:
+                            delay = random.uniform(1, 3)
+                            await asyncio.sleep(delay)
                         
                         print(f"\n[Page {page_num}] Scraping: {url}")
                         
-                        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                        await page.wait_for_timeout(2000)
+                        # Navigate with longer timeout and wait for network idle
+                        await page.goto(url, wait_until="networkidle", timeout=30000)
+                        
+                        # Human-like random delay
+                        await page.wait_for_timeout(random.randint(2000, 4000))
                         
                         # Check for Cloudflare challenge
                         page_content = await page.content()
-                        if 'Checking your browser' in page_content or 'Just a moment' in page_content or 'cf-browser-verification' in page_content:
-                            print("  ⚠ Cloudflare challenge detected")
-                            retries += 1
-                            continue
+                        if 'Checking your browser' in page_content or 'Just a moment' in page_content or 'cf-browser-verification' in page_content or 'challenge-platform' in page_content:
+                            print("  ⚠ Cloudflare challenge detected, waiting...")
+                            # Wait longer for Cloudflare to resolve
+                            await page.wait_for_timeout(10000)
+                            # Check again after waiting
+                            page_content = await page.content()
+                            if 'Checking your browser' in page_content or 'Just a moment' in page_content:
+                                print("  ⚠ Cloudflare challenge still present")
+                                retries += 1
+                                continue
                         
                         # Extract player URLs from current page
                         page_data = await page.evaluate("""
