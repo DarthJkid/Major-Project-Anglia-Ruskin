@@ -19,6 +19,7 @@ class SoFIFAScraper:
         self.player_stats = []
         self.columns = None
         self.csv_initialized = False
+        self.existing_player_ids = set()
 
     def load_player_urls(self):
         """Load player URLs from CSV file"""
@@ -31,8 +32,49 @@ class SoFIFAScraper:
         print(f"Loaded {len(self.player_urls)} player URLs")
         return self.player_urls
 
+    def load_existing_player_ids(self):
+        """Load player IDs that have already been scraped from the output CSV"""
+        import os
+        
+        if not os.path.isfile(self.output_file):
+            print(f"No existing output file found: {self.output_file}")
+            return set()
+        
+        existing_ids = set()
+        try:
+            with open(self.output_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if 'player_id' in row and row['player_id']:
+                        existing_ids.add(row['player_id'])
+            
+            print(f"Found {len(existing_ids)} existing players in {self.output_file}")
+            self.csv_initialized = True  # File exists, so CSV is already initialized
+        except Exception as e:
+            print(f"Error loading existing players: {e}")
+        
+        return existing_ids
+    
+    @staticmethod
+    def extract_player_id_from_url(url):
+        """Extract player ID from SoFIFA URL"""
+        # URL format: https://sofifa.com/player/158023/lionel-messi
+        try:
+            parts = url.rstrip('/').split('/')
+            # Find 'player' in parts and get the next element
+            if 'player' in parts:
+                idx = parts.index('player')
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+        except:
+            pass
+        return None
+
     async def scrape_player_stats(self, max_players=None):
         """Scrape detailed stats for each player"""
+        # Load existing player IDs to avoid re-scraping
+        self.existing_player_ids = self.load_existing_player_ids()
+        
         async with async_playwright() as p:
             # Enhanced browser launch with comprehensive anti-detection
             browser = await p.chromium.launch(
@@ -94,8 +136,16 @@ class SoFIFAScraper:
             
             urls_to_scrape = self.player_urls[:max_players] if max_players else self.player_urls
             total = len(urls_to_scrape)
+            skipped = 0
             
             for idx, url in enumerate(urls_to_scrape, 1):
+                # Check if player already exists
+                player_id = self.extract_player_id_from_url(url)
+                if player_id and player_id in self.existing_player_ids:
+                    print(f"\n[{idx}/{total}] ⏭ Skipping already scraped player ID: {player_id}")
+                    skipped += 1
+                    continue
+                
                 retries = 0
                 max_retries = 5
                 success = False
@@ -142,6 +192,9 @@ class SoFIFAScraper:
                             print(f"  ✓ Extracted: {stats.get('name', 'Unknown')} (ID: {stats.get('player_id', 'N/A')})")
                             # Save incrementally after each player
                             self.save_player_to_csv(stats)
+                            # Add to existing IDs set to prevent duplicates in same run
+                            if stats.get('player_id'):
+                                self.existing_player_ids.add(stats['player_id'])
                             success = True
                         else:
                             print("  ✗ No data extracted")
@@ -155,6 +208,10 @@ class SoFIFAScraper:
                     print(f"  ✗ Failed after {max_retries} retries, skipping...")
             
             await browser.close()
+            
+            # Print summary of skipped players
+            if skipped > 0:
+                print(f"\n⏭ Skipped {skipped} already scraped player(s)")
 
     def _get_column_order(self, stats_dict):
         """Define and return the column order for CSV"""
@@ -272,7 +329,8 @@ async def main():
     print("SCRAPING COMPLETED!")
     print("="*60)
     print(f"Total player URLs loaded: {len(scraper.player_urls)}")
-    print(f"Total player stats scraped: {len(scraper.player_stats)}")
+    print(f"Already scraped (skipped): {len(scraper.existing_player_ids)}")
+    print(f"Newly scraped this run: {len(scraper.player_stats)}")
     print("\nFile created:")
     print("  - player_stats.csv (detailed stats for all players)")
     
