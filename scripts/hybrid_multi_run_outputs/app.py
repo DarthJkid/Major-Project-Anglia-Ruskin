@@ -1,5 +1,7 @@
 import os
 import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -9,23 +11,21 @@ import plotly.express as px
 # PATH SETUP
 # ============================================================
 
-# Absolute path to this file's folder: .../scripts
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_FILE = Path(__file__).resolve()
 
-# Project root: parent of scripts/
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# Output folder created by the modelling pipeline
-DATA_DIR = os.path.join(PROJECT_ROOT, "hybrid_multi_run_outputs")
+PROJECT_ROOT = APP_FILE.parent.parent.parent
 
-st.set_page_config(page_title="Football Player Valuation App V2", layout="wide")
+# Change this only if your outputs are in a different folder
+DATA_DIR = APP_FILE.parent
+st.set_page_config(page_title="Football Player Valuation App", layout="wide")
 
-FINAL_VALUES_FILE = os.path.join(DATA_DIR, "final_player_values.csv")
-MERGED_FILE = os.path.join(DATA_DIR, "merged_inference_dataset.csv")
-METRICS_JSON_FILE = os.path.join(DATA_DIR, "metrics_summary.json")
-METRICS_CSV_FILE = os.path.join(DATA_DIR, "metrics_summary.csv")
-ALL_RUNS_METRICS_FILE = os.path.join(DATA_DIR, "all_runs_metrics.csv")
-SHAP_FILE = os.path.join(DATA_DIR, "shap_summary.csv")
+FINAL_VALUES_FILE = DATA_DIR / "final_player_values.csv"
+MERGED_FILE = DATA_DIR / "merged_inference_dataset.csv"
+METRICS_JSON_FILE = DATA_DIR / "metrics_summary.json"
+METRICS_CSV_FILE = DATA_DIR / "metrics_summary.csv"
+ALL_RUNS_METRICS_FILE = DATA_DIR / "all_runs_metrics.csv"
+SHAP_FILE = DATA_DIR / "shap_summary.csv"
 
 
 # ============================================================
@@ -33,7 +33,8 @@ SHAP_FILE = os.path.join(DATA_DIR, "shap_summary.csv")
 # ============================================================
 
 def safe_read_csv(path):
-    if not os.path.exists(path):
+    path = Path(path)
+    if not path.exists():
         return None
     try:
         return pd.read_csv(path)
@@ -42,7 +43,8 @@ def safe_read_csv(path):
 
 
 def safe_read_json(path):
-    if not os.path.exists(path):
+    path = Path(path)
+    if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -106,6 +108,76 @@ def build_simple_explanation(row):
     return explanations
 
 
+def ensure_required_columns(df):
+    """
+    Make the app resilient to missing output columns.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # player_name
+    if "player_name" not in df.columns:
+        for c in ["full_name", "name"]:
+            if c in df.columns:
+                df["player_name"] = df[c]
+                break
+    if "player_name" not in df.columns:
+        if "player_id" in df.columns:
+            df["player_name"] = df["player_id"]
+        else:
+            df["player_name"] = "Unknown Player"
+
+    # position_group
+    if "position_group" not in df.columns:
+        df["position_group"] = "UNK"
+
+    # predicted_value_mean fallback
+    if "predicted_value_mean" not in df.columns:
+        if "predicted_value" in df.columns:
+            df["predicted_value_mean"] = df["predicted_value"]
+        elif "predicted_value_median" in df.columns:
+            df["predicted_value_mean"] = df["predicted_value_median"]
+        else:
+            run_cols = [c for c in df.columns if c.startswith("pred_run_")]
+            if len(run_cols) > 0:
+                df["predicted_value_mean"] = df[run_cols].mean(axis=1)
+
+    # predicted_value_std fallback
+    if "predicted_value_std" not in df.columns:
+        run_cols = [c for c in df.columns if c.startswith("pred_run_")]
+        if len(run_cols) > 1:
+            df["predicted_value_std"] = df[run_cols].std(axis=1)
+
+    # predicted_minus_actual
+    if "predicted_minus_actual" not in df.columns:
+        if "predicted_value_mean" in df.columns and "actual_value" in df.columns:
+            df["predicted_minus_actual"] = df["predicted_value_mean"] - df["actual_value"]
+
+    # percentage_diff
+    if "percentage_diff" not in df.columns:
+        if "predicted_value_mean" in df.columns and "actual_value" in df.columns:
+            df["percentage_diff"] = (
+                (df["predicted_value_mean"] - df["actual_value"])
+                / df["actual_value"].replace(0, np.nan)
+            ) * 100
+
+    # valuation_label
+    if "valuation_label" not in df.columns and "percentage_diff" in df.columns:
+        df["valuation_label"] = np.where(df["percentage_diff"] > 0, "Undervalued", "Overvalued")
+
+    return df
+
+
+def safe_column_subset(df, columns):
+    """
+    Return only columns that exist.
+    """
+    existing = [c for c in columns if c in df.columns]
+    return df[existing].copy()
+
+
 # ============================================================
 # LOAD DATA
 # ============================================================
@@ -119,6 +191,8 @@ def load_data():
     all_runs_metrics = safe_read_csv(ALL_RUNS_METRICS_FILE)
     shap_df = safe_read_csv(SHAP_FILE)
 
+    final_df = ensure_required_columns(final_df)
+
     return final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df
 
 
@@ -127,39 +201,25 @@ final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df = load
 st.title("Football Player Market Value Prediction App")
 
 with st.expander("Loaded files", expanded=False):
-    st.write("Project root:", PROJECT_ROOT)
-    st.write("Data dir:", DATA_DIR)
-    st.write("Final values:", FINAL_VALUES_FILE, os.path.exists(FINAL_VALUES_FILE))
-    st.write("Merged inference dataset:", MERGED_FILE, os.path.exists(MERGED_FILE))
-    st.write("Metrics JSON:", METRICS_JSON_FILE, os.path.exists(METRICS_JSON_FILE))
-    st.write("Metrics CSV:", METRICS_CSV_FILE, os.path.exists(METRICS_CSV_FILE))
-    st.write("All runs metrics:", ALL_RUNS_METRICS_FILE, os.path.exists(ALL_RUNS_METRICS_FILE))
-    st.write("SHAP summary:", SHAP_FILE, os.path.exists(SHAP_FILE))
+    st.write("App file:", str(APP_FILE))
+    st.write("Project root:", str(PROJECT_ROOT))
+    st.write("Data dir:", str(DATA_DIR))
+    st.write("Final values:", str(FINAL_VALUES_FILE), FINAL_VALUES_FILE.exists())
+    st.write("Merged inference dataset:", str(MERGED_FILE), MERGED_FILE.exists())
+    st.write("Metrics JSON:", str(METRICS_JSON_FILE), METRICS_JSON_FILE.exists())
+    st.write("Metrics CSV:", str(METRICS_CSV_FILE), METRICS_CSV_FILE.exists())
+    st.write("All runs metrics:", str(ALL_RUNS_METRICS_FILE), ALL_RUNS_METRICS_FILE.exists())
+    st.write("SHAP summary:", str(SHAP_FILE), SHAP_FILE.exists())
 
 if final_df is None or final_df.empty:
     st.error(
         "final_player_values.csv could not be found or loaded.\n\n"
         "Expected location:\n"
         f"{FINAL_VALUES_FILE}\n\n"
-        "Run model_pipeline_v2.py first, then launch this app with:\n"
-        "streamlit run scripts/hybrid_multi_run_outputs/app.py"
+        "Run the modelling pipeline first, then launch this app with:\n"
+        "streamlit run scripts/app.py"
     )
     st.stop()
-
-# Ensure required columns exist
-if "player_name" not in final_df.columns:
-    for c in ["full_name", "name"]:
-        if c in final_df.columns:
-            final_df["player_name"] = final_df[c]
-            break
-if "player_name" not in final_df.columns:
-    final_df["player_name"] = final_df["player_id"]
-
-if "position_group" not in final_df.columns:
-    final_df["position_group"] = "UNK"
-
-if "valuation_label" not in final_df.columns and "percentage_diff" in final_df.columns:
-    final_df["valuation_label"] = np.where(final_df["percentage_diff"] > 0, "Undervalued", "Overvalued")
 
 # ============================================================
 # SIDEBAR
@@ -214,7 +274,7 @@ with tabs[0]:
     row = filtered_df[filtered_df["player_name"].astype(str) == selected_player].iloc[0]
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Predicted Value", format_eur(row.get("predicted_value_mean", row.get("predicted_value"))))
+    c1.metric("Predicted Value", format_eur(row.get("predicted_value_mean")))
     c2.metric("Actual Value", format_eur(row.get("actual_value")))
     c3.metric("Difference", format_eur(row.get("predicted_minus_actual")))
     c4.metric("% Difference", f"{row.get('percentage_diff', np.nan):.2f}%" if pd.notna(row.get("percentage_diff")) else "N/A")
@@ -258,10 +318,10 @@ with tabs[1]:
             st.subheader("Top 25 Undervalued")
             undervalued = filtered_df.sort_values("percentage_diff", ascending=False).head(25)
             st.dataframe(
-                undervalued[[
-                    "player_name", "position_group", "actual_value",
-                    "predicted_value_mean", "percentage_diff"
-                ]],
+                safe_column_subset(
+                    undervalued,
+                    ["player_name", "position_group", "actual_value", "predicted_value_mean", "percentage_diff"]
+                ),
                 use_container_width=True
             )
 
@@ -269,10 +329,10 @@ with tabs[1]:
             st.subheader("Top 25 Overvalued")
             overvalued = filtered_df.sort_values("percentage_diff", ascending=True).head(25)
             st.dataframe(
-                overvalued[[
-                    "player_name", "position_group", "actual_value",
-                    "predicted_value_mean", "percentage_diff"
-                ]],
+                safe_column_subset(
+                    overvalued,
+                    ["player_name", "position_group", "actual_value", "predicted_value_mean", "percentage_diff"]
+                ),
                 use_container_width=True
             )
 
@@ -287,10 +347,10 @@ with tabs[2]:
         st.subheader("Most uncertain players")
         uncertain = filtered_df.sort_values("predicted_value_std", ascending=False).head(25)
         st.dataframe(
-            uncertain[[
-                "player_name", "position_group", "predicted_value_mean",
-                "predicted_value_std", "percentage_diff"
-            ]],
+            safe_column_subset(
+                uncertain,
+                ["player_name", "position_group", "predicted_value_mean", "predicted_value_std", "percentage_diff"]
+            ),
             use_container_width=True
         )
 
@@ -342,7 +402,7 @@ with tabs[3]:
             .agg(
                 avg_pct_diff=("percentage_diff", "mean"),
                 avg_predicted_value=("predicted_value_mean", "mean"),
-                player_count=("player_id", "count")
+                player_count=("player_name", "count")
             )
             .sort_values("avg_pct_diff", ascending=False)
         )
@@ -351,17 +411,20 @@ with tabs[3]:
 
     if shap_df is not None and not shap_df.empty:
         st.subheader("Top SHAP Features")
-        if "mean_abs_shap_mean" in shap_df.columns:
-            shap_df = shap_df.rename(columns={"mean_abs_shap_mean": "mean_abs_shap"})
-        top20 = shap_df.head(20).sort_values("mean_abs_shap", ascending=True)
-        fig_shap = px.bar(
-            top20,
-            x="mean_abs_shap",
-            y="feature",
-            orientation="h",
-            title="Top 20 Features by Mean SHAP Importance"
-        )
-        st.plotly_chart(fig_shap, use_container_width=True)
+        shap_display = shap_df.copy()
+        if "mean_abs_shap_mean" in shap_display.columns and "mean_abs_shap" not in shap_display.columns:
+            shap_display = shap_display.rename(columns={"mean_abs_shap_mean": "mean_abs_shap"})
+
+        if {"feature", "mean_abs_shap"}.issubset(shap_display.columns):
+            top20 = shap_display.head(20).sort_values("mean_abs_shap", ascending=True)
+            fig_shap = px.bar(
+                top20,
+                x="mean_abs_shap",
+                y="feature",
+                orientation="h",
+                title="Top 20 Features by Mean SHAP Importance"
+            )
+            st.plotly_chart(fig_shap, use_container_width=True)
 
 # ============================================================
 # TAB 5
