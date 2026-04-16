@@ -1,9 +1,7 @@
-import os
 import json
 import re
 import unicodedata
 from pathlib import Path
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -30,7 +28,6 @@ METRICS_CSV_FILE = DATA_DIR / "metrics_summary.csv"
 ALL_RUNS_METRICS_FILE = DATA_DIR / "all_runs_metrics.csv"
 SHAP_FILE = DATA_DIR / "shap_summary.csv"
 
-# Main raw datasets for metadata enrichment
 EA_FILE = PROJECT_ROOT / "player_stats_cleaned.csv"
 TM_FILE = PROJECT_ROOT / "transfermarkt_merged_players_with_valuation.csv"
 FB_FILE = PROJECT_ROOT / "Fbref_Final_Data.csv"
@@ -76,18 +73,6 @@ def format_eur(x):
     if pd.isna(x):
         return "N/A"
     return f"€{x:,.0f}"
-
-
-def get_age_value(row):
-    for c in ["age_at_valuation", "age_ea", "age"]:
-        if c in row.index and pd.notna(row[c]):
-            return row[c]
-    return np.nan
-
-
-def safe_column_subset(df, cols):
-    existing = [c for c in cols if c in df.columns]
-    return df[existing].copy()
 
 
 def ensure_required_columns(df):
@@ -145,6 +130,25 @@ def ensure_required_columns(df):
     return df
 
 
+def safe_column_subset(df, cols):
+    existing = [c for c in cols if c in df.columns]
+    return df[existing].copy()
+
+
+def get_today():
+    return pd.Timestamp.today().normalize()
+
+
+def calculate_live_age_from_dob(dob):
+    if pd.isna(dob):
+        return np.nan
+    today = get_today()
+    dob = pd.to_datetime(dob, errors="coerce")
+    if pd.isna(dob):
+        return np.nan
+    return round((today - dob).days / 365.25, 2)
+
+
 def build_simple_explanation(row):
     explanations = []
 
@@ -159,11 +163,10 @@ def build_simple_explanation(row):
 
     if pd.notna(row.get("contract_years_left")) and row.get("contract_years_left", 0) >= 2:
         explanations.append("Longer contract length strengthens club leverage in the market.")
-
-    if pd.notna(row.get("contract_years_left_ea")) and row.get("contract_years_left_ea", 0) >= 2:
+    elif pd.notna(row.get("contract_years_left_ea")) and row.get("contract_years_left_ea", 0) >= 2:
         explanations.append("Longer contract length strengthens club leverage in the market.")
 
-    age_value = get_age_value(row)
+    age_value = row.get("live_age", np.nan)
     if pd.notna(age_value):
         if 23 <= age_value <= 28:
             explanations.append("The player is near the typical peak-value age range.")
@@ -184,7 +187,52 @@ def build_simple_explanation(row):
     if not explanations:
         explanations.append("This valuation appears to reflect a combined effect of ability, performance, age, and market context.")
 
-    return explanations
+    # deduplicate
+    seen = set()
+    deduped = []
+    for e in explanations:
+        if e not in seen:
+            deduped.append(e)
+            seen.add(e)
+
+    return deduped
+
+
+def deal_score(predicted_value, proposed_price):
+    """
+    Returns:
+    - score from 0 to 100
+    - difference value
+    - percentage over/under predicted
+    """
+    if pd.isna(predicted_value) or pd.isna(proposed_price) or predicted_value <= 0:
+        return np.nan, np.nan, np.nan
+
+    diff = predicted_value - proposed_price
+    pct = (diff / predicted_value) * 100
+
+    # Very favorable deals should score near 100.
+    # Overpaying significantly should push score toward 0.
+    score = 50 + (pct * 2.0)
+    score = max(0, min(100, score))
+
+    return round(score, 1), diff, pct
+
+
+def deal_label(score):
+    if pd.isna(score):
+        return "Unavailable"
+    if score >= 85:
+        return "Outstanding deal"
+    if score >= 70:
+        return "Very good deal"
+    if score >= 55:
+        return "Good / fair deal"
+    if score >= 40:
+        return "Slight overpay"
+    if score >= 20:
+        return "Poor deal"
+    return "Very poor deal"
 
 
 # ============================================================
@@ -208,17 +256,20 @@ def prepare_ea_metadata(ea):
 
     if "dob" in ea.columns:
         ea["dob"] = pd.to_datetime(ea["dob"], errors="coerce")
-        ref_date = pd.Timestamp(datetime.now().date())
-        ea["age_ea"] = (ref_date - ea["dob"]).dt.days / 365.25
+        ea["live_age"] = ea["dob"].apply(calculate_live_age_from_dob)
 
     if "club_contract_valid_until" in ea.columns:
         ea["club_contract_valid_until"] = pd.to_datetime(ea["club_contract_valid_until"], errors="coerce")
-        ref_date = pd.Timestamp(datetime.now().date())
+        ref_date = get_today()
         ea["contract_years_left_ea"] = ((ea["club_contract_valid_until"] - ref_date).dt.days / 365.25).clip(lower=0)
 
+    # club info only from EA
+    if "club_name" not in ea.columns:
+        ea["club_name"] = np.nan
+
     keep_cols = [
-        "name_key", "player_name", "overall_rating", "potential", "wage",
-        "club_league_name", "age_ea", "contract_years_left_ea", "positions"
+        "name_key", "player_name", "dob", "live_age", "overall_rating", "potential", "wage",
+        "club_name", "club_league_name", "contract_years_left_ea", "positions"
     ]
     keep_cols = [c for c in keep_cols if c in ea.columns]
 
@@ -245,18 +296,17 @@ def prepare_tm_metadata(tm):
 
     tm = tm.drop_duplicates("name_key", keep="first")
 
+    if "date_of_birth" in tm.columns:
+        tm["date_of_birth"] = pd.to_datetime(tm["date_of_birth"], errors="coerce")
+        tm["live_age_tm"] = tm["date_of_birth"].apply(calculate_live_age_from_dob)
+
     keep_cols = [
-        "name_key", "player_name", "current_club_name_valuation",
-        "player_club_domestic_competition_id", "age", "age_at_valuation",
-        "contract_years_left", "contract_expiration_date", "sub_position"
+        "name_key", "player_name", "date_of_birth", "live_age_tm",
+        "age", "age_at_valuation", "contract_years_left", "contract_expiration_date", "sub_position"
     ]
     keep_cols = [c for c in keep_cols if c in tm.columns]
 
     tm_meta = tm[keep_cols].copy()
-
-    if "current_club_name_valuation" in tm_meta.columns:
-        tm_meta["club_name"] = tm_meta["current_club_name_valuation"]
-
     return tm_meta
 
 
@@ -272,21 +322,30 @@ def prepare_fb_metadata(fb):
     fb["player_name"] = fb["Player"]
     fb["name_key"] = fb["player_name"].apply(normalize_name)
 
+    fb_numeric_cols = [
+        "Age", "MP", "Starts", "Subs", "Min", "90s",
+        "Gls", "Ast", "G+A", "G-PK", "PK", "PKatt",
+        "Sh", "SoT", "Int", "TklW",
+        "Gls/90", "Sh/90", "SoT/90", "Int/90", "TklW/90", "SoT%"
+    ]
+    for col in fb_numeric_cols:
+        if col in fb.columns:
+            fb[col] = pd.to_numeric(fb[col], errors="coerce")
+
     if {"name_key", "Min"}.issubset(fb.columns):
-        fb["Min"] = pd.to_numeric(fb["Min"], errors="coerce")
         fb = fb.sort_values(["name_key", "Min"], ascending=[True, False]).drop_duplicates("name_key", keep="first")
     else:
         fb = fb.drop_duplicates("name_key", keep="first")
 
     if {"Gls", "Ast", "90s"}.issubset(fb.columns):
-        fb["Gls"] = pd.to_numeric(fb["Gls"], errors="coerce")
-        fb["Ast"] = pd.to_numeric(fb["Ast"], errors="coerce")
-        fb["90s"] = pd.to_numeric(fb["90s"], errors="coerce")
         fb["goal_contrib_per90"] = np.where(fb["90s"] > 0, (fb["Gls"] + fb["Ast"]) / fb["90s"], np.nan)
 
     keep_cols = [
-        "name_key", "player_name", "Comp", "Pos", "Age", "Min",
-        "90s", "goal_contrib_per90", "Gls/90", "Sh/90", "SoT/90", "Int/90"
+        "name_key", "player_name", "Comp", "Pos", "Age", "Min", "90s",
+        "Gls", "Ast", "G+A", "G-PK", "PK", "PKatt",
+        "Sh", "SoT", "Int", "TklW",
+        "Gls/90", "Sh/90", "SoT/90", "Int/90", "TklW/90", "SoT%",
+        "goal_contrib_per90"
     ]
     keep_cols = [c for c in keep_cols if c in fb.columns]
 
@@ -295,99 +354,55 @@ def prepare_fb_metadata(fb):
 
 
 def build_master_metadata(ea_meta, tm_meta, fb_meta):
-    """
-    Combine EA, TM, and FB metadata safely without repeated suffix collisions.
-    """
     frames = [x for x in [ea_meta, tm_meta, fb_meta] if x is not None and not x.empty]
 
     if not frames:
         return None
 
-    # Start from first frame
     master = frames[0].copy()
 
-    # Merge the rest one by one, but rename overlapping columns first
     for i, df in enumerate(frames[1:], start=2):
         df = df.copy()
-
         overlap = [c for c in df.columns if c in master.columns and c != "name_key"]
         rename_map = {c: f"{c}_src{i}" for c in overlap}
         df = df.rename(columns=rename_map)
-
         master = master.merge(df, on="name_key", how="outer")
 
-    # --------------------------------------------------------
-    # Coalesce player_name
-    # --------------------------------------------------------
-    name_cols = [c for c in master.columns if c.startswith("player_name")]
-    if "player_name" not in master.columns and name_cols:
-        master["player_name"] = master[name_cols[0]]
+    def coalesce_column(target_base_names, final_name):
+        candidates = []
+        for base in target_base_names:
+            candidates.extend([c for c in master.columns if c == base or c.startswith(f"{base}_src")])
+        candidates = list(dict.fromkeys(candidates))
 
-    if "player_name" in master.columns:
-        for c in name_cols:
-            if c != "player_name":
-                master["player_name"] = master["player_name"].fillna(master[c])
+        if not candidates:
+            return
 
-    # --------------------------------------------------------
-    # Coalesce club_name
-    # --------------------------------------------------------
-    club_name_candidates = [c for c in master.columns if c in ["club_name", "current_club_name_valuation"] or c.startswith("club_name_") or c.startswith("current_club_name_valuation")]
-    if "club_name" not in master.columns and club_name_candidates:
-        master["club_name"] = master[club_name_candidates[0]]
+        if final_name not in master.columns:
+            master[final_name] = master[candidates[0]]
 
-    if "club_name" in master.columns:
-        for c in club_name_candidates:
-            if c != "club_name":
-                master["club_name"] = master["club_name"].fillna(master[c])
+        for c in candidates:
+            if c != final_name:
+                master[final_name] = master[final_name].fillna(master[c])
 
-    # --------------------------------------------------------
-    # Coalesce league_name
-    # --------------------------------------------------------
-    league_candidates = [c for c in master.columns if c in ["league_name", "club_league_name", "Comp", "player_club_domestic_competition_id"] or c.startswith("league_name_") or c.startswith("club_league_name") or c.startswith("Comp_") or c.startswith("player_club_domestic_competition_id")]
-    if "league_name" not in master.columns and league_candidates:
-        master["league_name"] = master[league_candidates[0]]
+    coalesce_column(["player_name"], "player_name")
+    coalesce_column(["live_age", "live_age_tm"], "live_age")
+    coalesce_column(["overall_rating"], "overall_rating")
+    coalesce_column(["potential"], "potential")
+    coalesce_column(["wage"], "wage")
+    coalesce_column(["club_name"], "club_name")
+    coalesce_column(["club_league_name", "Comp"], "club_league_name")
+    coalesce_column(["contract_years_left", "contract_years_left_ea"], "contract_years_left")
+    coalesce_column(["contract_years_left_ea"], "contract_years_left_ea")
+    coalesce_column(["positions", "sub_position", "Pos"], "position_group")
 
-    if "league_name" in master.columns:
-        for c in league_candidates:
-            if c != "league_name":
-                master["league_name"] = master["league_name"].fillna(master[c])
-
-    # --------------------------------------------------------
-    # Coalesce position_group
-    # --------------------------------------------------------
-    position_candidates = [c for c in master.columns if c in ["position_group", "positions", "sub_position", "Pos"] or c.startswith("position_group_") or c.startswith("positions_") or c.startswith("sub_position_") or c.startswith("Pos_")]
-    if "position_group" not in master.columns and position_candidates:
-        master["position_group"] = master[position_candidates[0]]
-
-    if "position_group" in master.columns:
-        for c in position_candidates:
-            if c != "position_group":
-                master["position_group"] = master["position_group"].fillna(master[c])
-
-    # --------------------------------------------------------
-    # Coalesce useful numeric / context fields
-    # --------------------------------------------------------
-    coalesce_targets = [
-        "overall_rating",
-        "potential",
-        "wage",
-        "age_ea",
-        "age",
-        "age_at_valuation",
-        "contract_years_left",
-        "contract_years_left_ea",
-        "goal_contrib_per90",
-        "Min"
+    stat_fields = [
+        "Min", "90s", "Gls", "Ast", "G+A", "G-PK", "PK", "PKatt",
+        "Sh", "SoT", "Int", "TklW",
+        "Gls/90", "Sh/90", "SoT/90", "Int/90", "TklW/90", "SoT%",
+        "goal_contrib_per90"
     ]
-
-    for target in coalesce_targets:
-        candidates = [c for c in master.columns if c == target or c.startswith(f"{target}_")]
-        if candidates:
-            if target not in master.columns:
-                master[target] = master[candidates[0]]
-            for c in candidates:
-                if c != target:
-                    master[target] = master[target].fillna(master[c])
+    for stat in stat_fields:
+        coalesce_column([stat], stat)
 
     master = master.drop_duplicates("name_key")
     return master
@@ -402,7 +417,6 @@ def enrich_predictions(final_df, merged_df, master_meta):
     if "name_key" not in final_df.columns:
         final_df["name_key"] = final_df["player_name"].apply(normalize_name)
 
-    # First enrich from merged file if available
     if merged_df is not None and not merged_df.empty:
         merged_df = merged_df.copy()
         if "player_name" not in merged_df.columns:
@@ -410,9 +424,6 @@ def enrich_predictions(final_df, merged_df, master_meta):
                 if c in merged_df.columns:
                     merged_df["player_name"] = merged_df[c]
                     break
-        if "player_name" not in merged_df.columns and "name_key" in merged_df.columns:
-            merged_df["player_name"] = merged_df["name_key"]
-
         if "name_key" not in merged_df.columns and "player_name" in merged_df.columns:
             merged_df["name_key"] = merged_df["player_name"].apply(normalize_name)
 
@@ -433,13 +444,14 @@ def enrich_predictions(final_df, merged_df, master_meta):
             suffixes=("", "_merged")
         )
 
-    # Then enrich from master metadata
     if master_meta is not None and not master_meta.empty:
         meta_keep = [
-            "name_key", "player_name", "position_group", "league_name", "club_name",
-            "overall_rating", "potential", "wage", "age_ea", "age",
-            "age_at_valuation", "contract_years_left", "contract_years_left_ea",
-            "goal_contrib_per90", "Min"
+            "name_key", "player_name", "live_age", "position_group",
+            "club_league_name", "club_name", "overall_rating", "potential", "wage",
+            "contract_years_left", "contract_years_left_ea",
+            "goal_contrib_per90", "Min", "90s", "Gls", "Ast", "G+A", "G-PK",
+            "PK", "PKatt", "Sh", "SoT", "Int", "TklW",
+            "Gls/90", "Sh/90", "SoT/90", "Int/90", "TklW/90", "SoT%"
         ]
         meta_keep = [c for c in meta_keep if c in master_meta.columns]
         master_small = master_meta[meta_keep].drop_duplicates("name_key")
@@ -451,49 +463,32 @@ def enrich_predictions(final_df, merged_df, master_meta):
             suffixes=("", "_meta")
         )
 
-    # fill player name
-    for col in ["player_name_merged", "player_name_meta"]:
-        if col in final_df.columns:
-            final_df["player_name"] = final_df["player_name"].fillna(final_df[col])
+    def fill_from_sources(base_col):
+        for src_col in [f"{base_col}_merged", f"{base_col}_meta"]:
+            if src_col in final_df.columns:
+                if base_col not in final_df.columns:
+                    final_df[base_col] = np.nan
+                final_df[base_col] = final_df[base_col].fillna(final_df[src_col])
 
-    # fill position
-    for col in ["position_group_merged", "position_group_meta"]:
-        if col in final_df.columns:
-            final_df["position_group"] = final_df["position_group"].replace("UNK", np.nan)
-            final_df["position_group"] = final_df["position_group"].fillna(final_df[col])
+    for col in [
+        "player_name", "position_group", "club_league_name", "club_name",
+        "overall_rating", "potential", "wage",
+        "age_ea", "age", "age_at_valuation", "contract_years_left",
+        "contract_years_left_ea", "goal_contrib_per90", "Min", "90s",
+        "Gls", "Ast", "G+A", "G-PK", "PK", "PKatt", "Sh", "SoT", "Int", "TklW",
+        "Gls/90", "Sh/90", "SoT/90", "Int/90", "TklW/90", "SoT%"
+    ]:
+        fill_from_sources(col)
 
-    final_df["position_group"] = final_df["position_group"].fillna("UNK")
+    if "live_age" not in final_df.columns:
+        final_df["live_age"] = np.nan
+    fill_from_sources("live_age")
 
-    # league / club fields
-    if "club_league_name" not in final_df.columns:
-        final_df["club_league_name"] = np.nan
-
-    if "league_name" in final_df.columns:
-        final_df["club_league_name"] = final_df["club_league_name"].fillna(final_df["league_name"])
-
-    if "club_name" not in final_df.columns:
-        final_df["club_name"] = np.nan
-
-    # fill remaining useful fields
-    fill_cols = [
-        "overall_rating", "potential", "wage", "age_ea", "age",
-        "age_at_valuation", "contract_years_left", "contract_years_left_ea",
-        "goal_contrib_per90", "Min"
-    ]
-
-    for base_col in fill_cols:
-        merged_col = f"{base_col}_merged"
-        meta_col = f"{base_col}_meta"
-
-        if merged_col in final_df.columns:
-            if base_col not in final_df.columns:
-                final_df[base_col] = np.nan
-            final_df[base_col] = final_df[base_col].fillna(final_df[merged_col])
-
-        if meta_col in final_df.columns:
-            if base_col not in final_df.columns:
-                final_df[base_col] = np.nan
-            final_df[base_col] = final_df[base_col].fillna(final_df[meta_col])
+    if "live_age" in final_df.columns:
+        if "age_ea" in final_df.columns:
+            final_df["live_age"] = final_df["live_age"].fillna(final_df["age_ea"])
+        if "age" in final_df.columns:
+            final_df["live_age"] = final_df["live_age"].fillna(final_df["age"])
 
     final_df = ensure_required_columns(final_df)
 
@@ -524,10 +519,10 @@ def load_data():
 
     final_df = enrich_predictions(final_df, merged_df, master_meta)
 
-    return final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df, master_meta
+    return final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df
 
 
-final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df, master_meta = load_data()
+final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df = load_data()
 
 st.title("Football Player Market Value Prediction App")
 
@@ -589,24 +584,24 @@ if "actual_value" in filtered_df.columns:
 
 tabs = st.tabs([
     "Player Lookup",
+    "Deal Evaluator",
     "Market Inefficiencies",
-    "Uncertainty & Shortlists",
+    "Uncertainty",
     "Insights Dashboard",
-    "Metrics & Model"
+    "Model Metrics"
 ])
 
 # ============================================================
-# TAB 1
+# TAB 1: PLAYER LOOKUP
 # ============================================================
 
 with tabs[0]:
     st.header("Player Lookup")
 
-    # Use full enriched predictions file only
-    player_options = sorted(filtered_df["player_name"].dropna().astype(str).unique().tolist())
+    player_options = sorted(final_df["player_name"].dropna().astype(str).unique().tolist())
     selected_player = st.selectbox("Select a player", player_options)
 
-    row = filtered_df[filtered_df["player_name"].astype(str) == selected_player].iloc[0]
+    row = final_df[final_df["player_name"].astype(str) == selected_player].iloc[0]
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Predicted Value", format_eur(row.get("predicted_value_mean")))
@@ -622,14 +617,14 @@ with tabs[0]:
     p4.write(f"**Status:** {row.get('valuation_label', 'N/A')}")
 
     p5, p6, p7, p8 = st.columns(4)
-    p5.write(f"**Age:** {get_age_value(row)}")
+    p5.write(f"**Current Age:** {row.get('live_age', 'N/A')}")
     p6.write(f"**Overall Rating:** {row.get('overall_rating', 'N/A')}")
     p7.write(f"**Potential:** {row.get('potential', 'N/A')}")
     p8.write(f"**Wage:** {format_eur(row.get('wage'))}")
 
     p9, p10, p11, p12 = st.columns(4)
-    p9.write(f"**Goal Contribution / 90:** {row.get('goal_contrib_per90', 'N/A')}")
-    p10.write(f"**Minutes:** {row.get('Min', 'N/A')}")
+    p9.write(f"**Minutes:** {row.get('Min', 'N/A')}")
+    p10.write(f"**90s:** {row.get('90s', 'N/A')}")
     p11.write(f"**Contract Years Left:** {row.get('contract_years_left', row.get('contract_years_left_ea', 'N/A'))}")
     p12.write(f"**Player ID:** {row.get('player_id', 'N/A')}")
 
@@ -644,11 +639,65 @@ with tabs[0]:
         st.write(f"- {item}")
 
 # ============================================================
-# TAB 2
+# TAB 2: DEAL EVALUATOR
 # ============================================================
 
 with tabs[1]:
+    st.header("Deal Evaluator")
+
+    st.write("""
+    Select a player and enter a proposed transfer price. The app compares that fee
+    against the model’s predicted value and returns a **deal score from 0 to 100**.
+    """)
+
+    player_options = sorted(final_df["player_name"].dropna().astype(str).unique().tolist())
+    deal_player = st.selectbox("Choose player for deal evaluation", player_options, key="deal_player")
+
+    deal_row = final_df[final_df["player_name"].astype(str) == deal_player].iloc[0]
+    predicted_val = deal_row.get("predicted_value_mean", np.nan)
+
+    proposed_price = st.number_input(
+        "Proposed purchase price (€)",
+        min_value=0,
+        value=int(predicted_val) if pd.notna(predicted_val) else 1000000,
+        step=500000
+    )
+
+    score, diff, pct = deal_score(predicted_val, proposed_price)
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Predicted Value", format_eur(predicted_val))
+    d2.metric("Proposed Price", format_eur(proposed_price))
+    d3.metric("Difference vs Model", format_eur(diff))
+    d4.metric("Deal Score", f"{score}/100" if pd.notna(score) else "N/A")
+
+    st.subheader("Assessment")
+    st.write(f"**Rating:** {deal_label(score)}")
+
+    if pd.notna(pct):
+        if pct > 0:
+            st.write(f"The proposed fee is **{pct:.2f}% below** the modelled value, which suggests a relatively favourable deal.")
+        elif pct < 0:
+            st.write(f"The proposed fee is **{abs(pct):.2f}% above** the modelled value, which suggests an overpay relative to the model.")
+        else:
+            st.write("The proposed fee is exactly aligned with the modelled value.")
+
+# ============================================================
+# TAB 3: MARKET INEFFICIENCIES
+# ============================================================
+
+with tabs[2]:
     st.header("Market Inefficiencies")
+
+    st.write("""
+    **How to read this section**
+    
+    - A **positive percentage difference** means the model predicts a player should be worth **more** than their observed market value.  
+      This suggests the player may be **undervalued**.
+    - A **negative percentage difference** means the model predicts a player should be worth **less** than their observed market value.  
+      This suggests the player may be **overvalued**.
+    - League tables summarise the **average percentage difference** across players in each league.
+    """)
 
     if "percentage_diff" not in filtered_df.columns:
         st.warning("percentage_diff is missing, so undervaluation / overvaluation tables cannot be shown.")
@@ -680,9 +729,11 @@ with tabs[1]:
             )
 
         st.subheader("League-Based Market Inefficiencies")
-        if "club_league_name" in filtered_df.columns:
+
+        # IMPORTANT: all leagues from the full dataset, not filtered_df
+        if "club_league_name" in final_df.columns and "percentage_diff" in final_df.columns:
             league_summary = (
-                filtered_df.groupby("club_league_name", as_index=False)
+                final_df.groupby("club_league_name", dropna=False, as_index=False)
                 .agg(
                     avg_pct_diff=("percentage_diff", "mean"),
                     avg_actual_value=("actual_value", "mean"),
@@ -691,51 +742,81 @@ with tabs[1]:
                 )
                 .sort_values("avg_pct_diff", ascending=False)
             )
+
             st.dataframe(league_summary, use_container_width=True)
+
+            if not league_summary.empty:
+                top_under = league_summary.iloc[0]
+                top_over = league_summary.iloc[-1]
+
+                st.write(
+                    f"**Key insight:** The league with the highest average positive difference is "
+                    f"**{top_under['club_league_name']}** ({top_under['avg_pct_diff']:.2f}%), "
+                    f"suggesting players there may be relatively undervalued in aggregate."
+                )
+                st.write(
+                    f"**Key insight:** The league with the most negative average difference is "
+                    f"**{top_over['club_league_name']}** ({top_over['avg_pct_diff']:.2f}%), "
+                    f"suggesting players there may be relatively overvalued in aggregate."
+                )
 
             fig_league = px.bar(
                 league_summary,
-                x="club_league_name",
-                y="avg_pct_diff",
+                y="club_league_name",
+                x="avg_pct_diff",
+                orientation="h",
                 title="Average Percentage Difference by League"
             )
             st.plotly_chart(fig_league, use_container_width=True)
 
 # ============================================================
-# TAB 3
+# TAB 4: UNCERTAINTY
 # ============================================================
 
-with tabs[2]:
-    st.header("Uncertainty and Shortlists")
+with tabs[3]:
+    st.header("Uncertainty")
 
     if "predicted_value_std" in filtered_df.columns:
-        st.subheader("Most uncertain players")
-        uncertain = filtered_df.sort_values("predicted_value_std", ascending=False).head(25)
-        st.dataframe(
-            safe_column_subset(
-                uncertain,
-                ["player_name", "position_group", "club_name", "club_league_name",
-                 "predicted_value_mean", "predicted_value_std", "percentage_diff"]
-            ),
-            use_container_width=True
-        )
+        st.write("""
+        This view shows how stable player valuations are across repeated model runs.
+        Higher uncertainty means the model is less consistent about the player’s value.
+        """)
 
-        fig_uncertainty = px.histogram(
+        fig_uncertainty_scatter = px.scatter(
+            filtered_df,
+            x="predicted_value_mean",
+            y="predicted_value_std",
+            color="position_group",
+            hover_data=["player_name", "club_name", "club_league_name"],
+            title="Predicted Value vs Prediction Uncertainty",
+            height=700
+        )
+        st.plotly_chart(fig_uncertainty_scatter, use_container_width=True)
+
+        fig_uncertainty_hist = px.histogram(
             filtered_df,
             x="predicted_value_std",
             nbins=40,
             title="Distribution of Prediction Uncertainty"
         )
-        st.plotly_chart(fig_uncertainty, use_container_width=True)
+        st.plotly_chart(fig_uncertainty_hist, use_container_width=True)
     else:
         st.info("predicted_value_std is not available.")
 
 # ============================================================
-# TAB 4
+# TAB 5: INSIGHTS DASHBOARD
 # ============================================================
 
-with tabs[3]:
+with tabs[4]:
     st.header("Insights Dashboard")
+
+    st.write("""
+    **How to interpret the dashboard**
+    
+    - The scatter plot compares actual and predicted values. A tighter diagonal pattern indicates better calibration.
+    - Position and league summaries highlight where the model tends to over- or under-estimate values.
+    - If SHAP data is available, it shows which features matter most globally.
+    """)
 
     if "actual_value" in filtered_df.columns and "predicted_value_mean" in filtered_df.columns:
         fig_scatter = px.scatter(
@@ -743,7 +824,7 @@ with tabs[3]:
             x="actual_value",
             y="predicted_value_mean",
             color="position_group",
-            hover_data=["player_name"],
+            hover_data=["player_name", "club_name", "club_league_name"],
             title="Actual vs Predicted Player Values"
         )
         st.plotly_chart(fig_scatter, use_container_width=True)
@@ -772,7 +853,7 @@ with tabs[3]:
             )
             .sort_values("avg_pct_diff", ascending=False)
         )
-        st.subheader("League-level view")
+        st.subheader("League-Level View")
         st.dataframe(league_view, use_container_width=True)
 
     if shap_df is not None and not shap_df.empty:
@@ -793,11 +874,20 @@ with tabs[3]:
             st.plotly_chart(fig_shap, use_container_width=True)
 
 # ============================================================
-# TAB 5
+# TAB 6: MODEL METRICS
 # ============================================================
 
-with tabs[4]:
-    st.header("Metrics and Model Information")
+with tabs[5]:
+    st.header("Model Metrics")
+
+    st.write("""
+    **How to interpret these metrics**
+    
+    - **R²** indicates how much variation in market value the model explains.
+    - **RMSE** and **MAE** measure error in euro terms.
+    - **Accuracy@10%** and **Accuracy@20%** show how often predictions fall close to the observed value.
+    - Repeated-run averaging improves robustness and allows uncertainty estimation.
+    """)
 
     st.subheader("Metric Summary")
     if metrics_json is not None:
@@ -821,10 +911,3 @@ with tabs[4]:
         st.dataframe(all_runs_metrics, use_container_width=True)
     else:
         st.info("No all_runs_metrics.csv file found.")
-
-    st.subheader("Interpretation")
-    st.write("""
-    - Positive percentage difference means the model believes the player may be undervalued relative to the observed market value.
-    - Negative percentage difference means the model believes the player may be overvalued.
-    - Higher prediction standard deviation means the valuation is less stable across repeated runs.
-    """)
