@@ -1,0 +1,13 @@
+{
+  "experiment_id": "20260622_000407",
+  "timestamp": "2026-06-22T00:04:07",
+  "notes": "Baseline hybrid model (initial logged run)",
+  "n_runs": 15,
+  "R2": 0.9468871615380825,
+  "RMSE": 2487878.7956146654,
+  "MAE": 1003489.7925841144,
+  "Accuracy@10%": 29.612903225806456,
+  "Accuracy@20%": 54.473118279569896,
+  "MAPE": 23.23866539849586,
+  "Mean Percentage Error": 3.4975093534035193
+}
