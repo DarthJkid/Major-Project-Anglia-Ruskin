@@ -4,7 +4,7 @@ A machine-learning project that predicts the transfer-market value of profession
 footballers and surfaces the results through an interactive **Streamlit dashboard**.
 Final-year major project, Anglia Ruskin University.
 
-> **Live app:** _add your Streamlit Community Cloud URL here once deployed_
+> **Live app:** [Here](https://major-project-anglia-ruskin-ha2eyfpahrhxar5dc73twu.streamlit.app/)
 
 ---
 
