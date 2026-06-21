@@ -11,16 +11,15 @@ import plotly.express as px
 # ============================================================
 # PATH SETUP
 # ============================================================
+# All runtime data lives in the data/ folder next to this file, so the app
+# behaves identically locally and on Streamlit Community Cloud.
 
-APP_FILE = Path(__file__).resolve()
-
-PROJECT_ROOT = APP_FILE.parent.parent.parent
-
-# Your stable setup
-DATA_DIR = APP_FILE.parent
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = APP_DIR / "data"
 
 st.set_page_config(page_title="Football Player Valuation App", layout="wide")
 
+# Model outputs
 FINAL_VALUES_FILE = DATA_DIR / "final_player_values.csv"
 MERGED_FILE = DATA_DIR / "merged_inference_dataset.csv"
 METRICS_JSON_FILE = DATA_DIR / "metrics_summary.json"
@@ -28,9 +27,69 @@ METRICS_CSV_FILE = DATA_DIR / "metrics_summary.csv"
 ALL_RUNS_METRICS_FILE = DATA_DIR / "all_runs_metrics.csv"
 SHAP_FILE = DATA_DIR / "shap_summary.csv"
 
-EA_FILE = PROJECT_ROOT / "player_stats_cleaned.csv"
-TM_FILE = PROJECT_ROOT / "transfermarkt_merged_players_with_valuation.csv"
-FB_FILE = PROJECT_ROOT / "Fbref_Final_Data.csv"
+# Cleaned source datasets used to enrich player metadata
+EA_FILE = DATA_DIR / "player_stats_cleaned.csv"
+TM_FILE = DATA_DIR / "transfermarkt_merged_players_with_valuation.csv"
+FB_FILE = DATA_DIR / "Fbref_Final_Data.csv"
+
+# Experiment history (written by scripts/experiment_tracker.py)
+EXPERIMENT_LOG_FILE = APP_DIR / "experiments" / "experiment_log.csv"
+
+
+# ============================================================
+# APPEARANCE & ACCESSIBILITY
+# ============================================================
+# Okabe-Ito: a colour-blind-safe qualitative palette used for every chart so
+# categories stay distinguishable for users with colour-vision deficiencies.
+OKABE_ITO = [
+    "#0072B2", "#E69F00", "#009E73", "#D55E00",
+    "#CC79A7", "#56B4E9", "#F0E442", "#000000",
+]
+
+APPEARANCE_THEMES = {
+    "Light": {
+        "bg": "#ffffff", "secondary_bg": "#f3f5f7", "text": "#1a1a1a",
+        "primary": "#1b9e77", "plotly_template": "plotly_white",
+    },
+    "Dark": {
+        "bg": "#0e1117", "secondary_bg": "#1c2027", "text": "#e8e8e8",
+        "primary": "#2dd4a7", "plotly_template": "plotly_dark",
+    },
+    "High contrast": {
+        "bg": "#000000", "secondary_bg": "#0a0a0a", "text": "#ffffff",
+        "primary": "#ffd400", "plotly_template": "plotly_dark",
+    },
+}
+
+# Multipliers applied to the root font size for readability.
+TEXT_SCALES = {"Normal": 1.0, "Large": 1.15, "Extra large": 1.3}
+
+
+def apply_appearance(theme, scale):
+    """Restyle the app chrome via CSS and set colour-blind-safe chart defaults."""
+    base_px = 16 * scale
+    st.markdown(
+        f"""
+        <style>
+        html {{ font-size: {base_px:.1f}px; }}
+        .stApp {{ background-color: {theme['bg']}; color: {theme['text']}; }}
+        [data-testid="stHeader"] {{ background-color: {theme['bg']}; }}
+        [data-testid="stSidebar"] {{ background-color: {theme['secondary_bg']}; }}
+        .stApp p, .stApp li, .stApp label, .stApp span,
+        .stApp h1, .stApp h2, .stApp h3, .stApp h4,
+        .stTabs [data-baseweb="tab"] {{ color: {theme['text']}; }}
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{ color: {theme['text']}; }}
+        /* Visible keyboard-focus outline for accessibility */
+        .stApp a:focus, .stApp button:focus, .stApp input:focus,
+        .stApp select:focus, .stApp [role="tab"]:focus {{
+            outline: 3px solid {theme['primary']}; outline-offset: 2px;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    px.defaults.template = theme["plotly_template"]
+    px.defaults.color_discrete_sequence = OKABE_ITO
 
 
 # ============================================================
@@ -300,9 +359,17 @@ def prepare_tm_metadata(tm):
         tm["date_of_birth"] = pd.to_datetime(tm["date_of_birth"], errors="coerce")
         tm["live_age_tm"] = tm["date_of_birth"].apply(calculate_live_age_from_dob)
 
+    # Carry the observed market value so it can back-fill actual_value for
+    # players the model only ran inference on (e.g. Haaland, Mbappe).
+    if "market_value_in_eur_valuation" in tm.columns:
+        tm["actual_value_tm"] = pd.to_numeric(
+            tm["market_value_in_eur_valuation"], errors="coerce"
+        )
+
     keep_cols = [
         "name_key", "player_name", "date_of_birth", "live_age_tm",
-        "age", "age_at_valuation", "contract_years_left", "contract_expiration_date", "sub_position"
+        "age", "age_at_valuation", "contract_years_left", "contract_expiration_date",
+        "sub_position", "actual_value_tm"
     ]
     keep_cols = [c for c in keep_cols if c in tm.columns]
 
@@ -394,6 +461,7 @@ def build_master_metadata(ea_meta, tm_meta, fb_meta):
     coalesce_column(["contract_years_left", "contract_years_left_ea"], "contract_years_left")
     coalesce_column(["contract_years_left_ea"], "contract_years_left_ea")
     coalesce_column(["positions", "sub_position", "Pos"], "position_group")
+    coalesce_column(["actual_value_tm"], "actual_value_tm")
 
     stat_fields = [
         "Min", "90s", "Gls", "Ast", "G+A", "G-PK", "PK", "PKatt",
@@ -406,6 +474,79 @@ def build_master_metadata(ea_meta, tm_meta, fb_meta):
 
     master = master.drop_duplicates("name_key")
     return master
+
+
+# Maps granular position codes (and the original coarse labels) to four buckets
+# so the Position filter and per-position charts stay readable after the source
+# data brings in detailed positions like "CDM, CM" or "LB, LM".
+POSITION_GROUP_MAP = {
+    "GK": "GK",
+    "CB": "DEF", "LB": "DEF", "RB": "DEF", "LWB": "DEF", "RWB": "DEF", "WB": "DEF", "DEF": "DEF",
+    "CDM": "MID", "DM": "MID", "CM": "MID", "CAM": "MID", "AM": "MID",
+    "LM": "MID", "RM": "MID", "MID": "MID",
+    "ST": "FWD", "CF": "FWD", "LW": "FWD", "RW": "FWD", "FW": "FWD", "FWD": "FWD",
+}
+
+
+def coarse_position(pos):
+    """Reduce a (possibly multi-) position string to one of GK/DEF/MID/FWD/UNK."""
+    if pd.isna(pos):
+        return "UNK"
+    first = str(pos).split(",")[0].strip().upper()
+    return POSITION_GROUP_MAP.get(first, "UNK")
+
+
+def recover_identity_from_id(df):
+    """Derive name_key (and a fallback date of birth) from the composite player_id.
+
+    player_id has the form '<normalized_name>__<dob>' and is present on EVERY
+    row, whereas player_name is missing for inference-only players (e.g. Erling
+    Haaland, Kylian Mbappe). Driving name_key from the id lets those rows match
+    the source datasets and recover their real, accented names and metadata,
+    instead of being dropped from the dashboard.
+    """
+    if df is None or df.empty or "player_id" not in df.columns:
+        return df
+    df = df.copy()
+    parts = df["player_id"].astype("string").str.split("__", n=1)
+    key = parts.str[0].str.strip()
+    df["name_key"] = key.where(key.str.len() > 0)
+    df["dob_from_id"] = pd.to_datetime(parts.str[1].str.strip(), errors="coerce")
+    return df
+
+
+def finalize_identity(df):
+    """Last-resort fallbacks so every prediction has a readable name and age.
+
+    Runs after source enrichment: any player_name still missing is filled from a
+    title-cased name_key, and live_age is back-filled from the id-derived dob.
+    """
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+
+    if "name_key" in df.columns:
+        readable = df["name_key"].astype("string").str.title()
+        if "player_name" in df.columns:
+            pn = df["player_name"].astype("string")
+            df["player_name"] = pn.where(pn.notna() & (pn.str.strip() != ""), readable)
+        else:
+            df["player_name"] = readable
+
+    if "dob_from_id" in df.columns:
+        age_from_id = df["dob_from_id"].apply(calculate_live_age_from_dob)
+        if "live_age" in df.columns:
+            df["live_age"] = df["live_age"].fillna(age_from_id)
+        else:
+            df["live_age"] = age_from_id
+
+    # Keep the detailed position for display, but bucket position_group so the
+    # filter and per-position charts remain usable.
+    if "position_group" in df.columns:
+        df["position_detail"] = df["position_group"]
+        df["position_group"] = df["position_group"].apply(coarse_position)
+
+    return df
 
 
 def enrich_predictions(final_df, merged_df, master_meta):
@@ -448,7 +589,7 @@ def enrich_predictions(final_df, merged_df, master_meta):
         meta_keep = [
             "name_key", "player_name", "live_age", "position_group",
             "club_league_name", "club_name", "overall_rating", "potential", "wage",
-            "contract_years_left", "contract_years_left_ea",
+            "contract_years_left", "contract_years_left_ea", "actual_value_tm",
             "goal_contrib_per90", "Min", "90s", "Gls", "Ast", "G+A", "G-PK",
             "PK", "PKatt", "Sh", "SoT", "Int", "TklW",
             "Gls/90", "Sh/90", "SoT/90", "Int/90", "TklW/90", "SoT%"
@@ -490,6 +631,20 @@ def enrich_predictions(final_df, merged_df, master_meta):
         if "age" in final_df.columns:
             final_df["live_age"] = final_df["live_age"].fillna(final_df["age"])
 
+    # Back-fill the observed market value for inference-only players from the TM
+    # source, then drop the derived columns so they are recomputed from the now
+    # more-complete actual_value. (Model-evaluated players keep their original
+    # value; a full model re-run will later regenerate all of them consistently.)
+    fill_from_sources("actual_value_tm")
+    if "actual_value_tm" in final_df.columns:
+        if "actual_value" not in final_df.columns:
+            final_df["actual_value"] = np.nan
+        final_df["actual_value"] = final_df["actual_value"].fillna(final_df["actual_value_tm"])
+        final_df = final_df.drop(
+            columns=[c for c in ["predicted_minus_actual", "percentage_diff", "valuation_label"]
+                     if c in final_df.columns]
+        )
+
     final_df = ensure_required_columns(final_df)
 
     return final_df
@@ -502,6 +657,7 @@ def enrich_predictions(final_df, merged_df, master_meta):
 @st.cache_data
 def load_data():
     final_df = safe_read_csv(FINAL_VALUES_FILE)
+    final_df = recover_identity_from_id(final_df)
     merged_df = safe_read_csv(MERGED_FILE)
     metrics_json = safe_read_json(METRICS_JSON_FILE)
     metrics_csv = safe_read_csv(METRICS_CSV_FILE)
@@ -518,6 +674,7 @@ def load_data():
     master_meta = build_master_metadata(ea_meta, tm_meta, fb_meta)
 
     final_df = enrich_predictions(final_df, merged_df, master_meta)
+    final_df = finalize_identity(final_df)
 
     return final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df
 
@@ -525,28 +682,17 @@ def load_data():
 final_df, merged_df, metrics_json, metrics_csv, all_runs_metrics, shap_df = load_data()
 
 st.title("Football Player Market Value Prediction App")
-
-with st.expander("Loaded files", expanded=False):
-    st.write("App file:", str(APP_FILE))
-    st.write("Project root:", str(PROJECT_ROOT))
-    st.write("Data dir:", str(DATA_DIR))
-    st.write("Final values:", str(FINAL_VALUES_FILE), FINAL_VALUES_FILE.exists())
-    st.write("Merged inference dataset:", str(MERGED_FILE), MERGED_FILE.exists())
-    st.write("Metrics JSON:", str(METRICS_JSON_FILE), METRICS_JSON_FILE.exists())
-    st.write("Metrics CSV:", str(METRICS_CSV_FILE), METRICS_CSV_FILE.exists())
-    st.write("All runs metrics:", str(ALL_RUNS_METRICS_FILE), ALL_RUNS_METRICS_FILE.exists())
-    st.write("SHAP summary:", str(SHAP_FILE), SHAP_FILE.exists())
-    st.write("EA raw:", str(EA_FILE), EA_FILE.exists())
-    st.write("TM raw:", str(TM_FILE), TM_FILE.exists())
-    st.write("FB raw:", str(FB_FILE), FB_FILE.exists())
+st.caption(
+    "Predicted transfer-market values from a hybrid model, with deal evaluation, "
+    "market-inefficiency analysis and prediction uncertainty."
+)
 
 if final_df is None or final_df.empty:
     st.error(
-        "final_player_values.csv could not be found or loaded.\n\n"
-        "Expected location:\n"
-        f"{FINAL_VALUES_FILE}\n\n"
-        "Run the modelling pipeline first, then launch this app with:\n"
-        "streamlit run scripts/app.py"
+        "Player valuation data could not be loaded.\n\n"
+        f"Expected file: `{FINAL_VALUES_FILE.name}` in the `data/` folder.\n\n"
+        "If you are running locally, generate the model outputs first, then launch with:\n"
+        "`streamlit run streamlit_app.py`"
     )
     st.stop()
 
@@ -554,6 +700,19 @@ if final_df is None or final_df.empty:
 # SIDEBAR
 # ============================================================
 
+st.sidebar.header("Appearance")
+theme_name = st.sidebar.selectbox(
+    "Colour theme", list(APPEARANCE_THEMES.keys()),
+    help="Restyles the interface. Charts always use a colour-blind-safe palette.",
+)
+text_size = st.sidebar.selectbox("Text size", list(TEXT_SCALES.keys()))
+apply_appearance(APPEARANCE_THEMES[theme_name], TEXT_SCALES[text_size])
+st.sidebar.caption(
+    "For full dark mode including data tables, you can also use "
+    "☰ → Settings → Theme."
+)
+
+st.sidebar.divider()
 st.sidebar.header("Filters")
 
 position_options = ["All"] + sorted(final_df["position_group"].dropna().astype(str).unique().tolist())
@@ -582,6 +741,11 @@ if selected_league != "All" and league_col is not None:
 if "actual_value" in filtered_df.columns:
     filtered_df = filtered_df[filtered_df["actual_value"].fillna(0) >= min_actual]
 
+st.sidebar.caption(
+    f"Matching players: {filtered_df['player_name'].nunique():,} "
+    f"of {final_df['player_name'].nunique():,}"
+)
+
 tabs = st.tabs([
     "Player Lookup",
     "Deal Evaluator",
@@ -598,45 +762,48 @@ tabs = st.tabs([
 with tabs[0]:
     st.header("Player Lookup")
 
-    player_options = sorted(final_df["player_name"].dropna().astype(str).unique().tolist())
-    selected_player = st.selectbox("Select a player", player_options)
+    player_options = sorted(filtered_df["player_name"].dropna().astype(str).unique().tolist())
+    if not player_options:
+        st.info("No players match the current filters. Adjust the filters in the sidebar.")
+    else:
+        selected_player = st.selectbox("Select a player", player_options)
 
-    row = final_df[final_df["player_name"].astype(str) == selected_player].iloc[0]
+        row = filtered_df[filtered_df["player_name"].astype(str) == selected_player].iloc[0]
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Predicted Value", format_eur(row.get("predicted_value_mean")))
-    c2.metric("Actual Value", format_eur(row.get("actual_value")))
-    c3.metric("Difference", format_eur(row.get("predicted_minus_actual")))
-    c4.metric("% Difference", f"{row.get('percentage_diff', np.nan):.2f}%" if pd.notna(row.get("percentage_diff")) else "N/A")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Predicted Value", format_eur(row.get("predicted_value_mean")))
+        c2.metric("Actual Value", format_eur(row.get("actual_value")))
+        c3.metric("Difference", format_eur(row.get("predicted_minus_actual")))
+        c4.metric("% Difference", f"{row.get('percentage_diff', np.nan):.2f}%" if pd.notna(row.get("percentage_diff")) else "N/A")
 
-    st.subheader("Profile")
-    p1, p2, p3, p4 = st.columns(4)
-    p1.write(f"**Position:** {row.get('position_group', 'N/A')}")
-    p2.write(f"**League:** {row.get('club_league_name', 'N/A')}")
-    p3.write(f"**Club:** {row.get('club_name', 'N/A')}")
-    p4.write(f"**Status:** {row.get('valuation_label', 'N/A')}")
+        st.subheader("Profile")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.write(f"**Position:** {row.get('position_detail') or row.get('position_group', 'N/A')}")
+        p2.write(f"**League:** {row.get('club_league_name', 'N/A')}")
+        p3.write(f"**Club:** {row.get('club_name', 'N/A')}")
+        p4.write(f"**Status:** {row.get('valuation_label', 'N/A')}")
 
-    p5, p6, p7, p8 = st.columns(4)
-    p5.write(f"**Current Age:** {row.get('live_age', 'N/A')}")
-    p6.write(f"**Overall Rating:** {row.get('overall_rating', 'N/A')}")
-    p7.write(f"**Potential:** {row.get('potential', 'N/A')}")
-    p8.write(f"**Wage:** {format_eur(row.get('wage'))}")
+        p5, p6, p7, p8 = st.columns(4)
+        p5.write(f"**Current Age:** {row.get('live_age', 'N/A')}")
+        p6.write(f"**Overall Rating:** {row.get('overall_rating', 'N/A')}")
+        p7.write(f"**Potential:** {row.get('potential', 'N/A')}")
+        p8.write(f"**Wage:** {format_eur(row.get('wage'))}")
 
-    p9, p10, p11, p12 = st.columns(4)
-    p9.write(f"**Minutes:** {row.get('Min', 'N/A')}")
-    p10.write(f"**90s:** {row.get('90s', 'N/A')}")
-    p11.write(f"**Contract Years Left:** {row.get('contract_years_left', row.get('contract_years_left_ea', 'N/A'))}")
-    p12.write(f"**Player ID:** {row.get('player_id', 'N/A')}")
+        p9, p10, p11, p12 = st.columns(4)
+        p9.write(f"**Minutes:** {row.get('Min', 'N/A')}")
+        p10.write(f"**90s:** {row.get('90s', 'N/A')}")
+        p11.write(f"**Contract Years Left:** {row.get('contract_years_left', row.get('contract_years_left_ea', 'N/A'))}")
+        p12.write(f"**Player ID:** {row.get('player_id', 'N/A')}")
 
-    if "predicted_value_std" in row.index and pd.notna(row.get("predicted_value_std")):
-        lower = max(0, row["predicted_value_mean"] - row["predicted_value_std"])
-        upper = row["predicted_value_mean"] + row["predicted_value_std"]
-        st.write(f"**Prediction uncertainty (std):** {format_eur(row['predicted_value_std'])}")
-        st.write(f"**Indicative range:** {format_eur(lower)} to {format_eur(upper)}")
+        if "predicted_value_std" in row.index and pd.notna(row.get("predicted_value_std")):
+            lower = max(0, row["predicted_value_mean"] - row["predicted_value_std"])
+            upper = row["predicted_value_mean"] + row["predicted_value_std"]
+            st.write(f"**Prediction uncertainty (std):** {format_eur(row['predicted_value_std'])}")
+            st.write(f"**Indicative range:** {format_eur(lower)} to {format_eur(upper)}")
 
-    st.subheader("Explanation")
-    for item in build_simple_explanation(row):
-        st.write(f"- {item}")
+        st.subheader("Explanation")
+        for item in build_simple_explanation(row):
+            st.write(f"- {item}")
 
 # ============================================================
 # TAB 2: DEAL EVALUATOR
@@ -650,37 +817,40 @@ with tabs[1]:
     against the model’s predicted value and returns a **deal score from 0 to 100**.
     """)
 
-    player_options = sorted(final_df["player_name"].dropna().astype(str).unique().tolist())
-    deal_player = st.selectbox("Choose player for deal evaluation", player_options, key="deal_player")
+    player_options = sorted(filtered_df["player_name"].dropna().astype(str).unique().tolist())
+    if not player_options:
+        st.info("No players match the current filters. Adjust the filters in the sidebar.")
+    else:
+        deal_player = st.selectbox("Choose player for deal evaluation", player_options, key="deal_player")
 
-    deal_row = final_df[final_df["player_name"].astype(str) == deal_player].iloc[0]
-    predicted_val = deal_row.get("predicted_value_mean", np.nan)
+        deal_row = filtered_df[filtered_df["player_name"].astype(str) == deal_player].iloc[0]
+        predicted_val = deal_row.get("predicted_value_mean", np.nan)
 
-    proposed_price = st.number_input(
-        "Proposed purchase price (€)",
-        min_value=0,
-        value=int(predicted_val) if pd.notna(predicted_val) else 1000000,
-        step=500000
-    )
+        proposed_price = st.number_input(
+            "Proposed purchase price (€)",
+            min_value=0,
+            value=int(predicted_val) if pd.notna(predicted_val) else 1000000,
+            step=500000
+        )
 
-    score, diff, pct = deal_score(predicted_val, proposed_price)
+        score, diff, pct = deal_score(predicted_val, proposed_price)
 
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Predicted Value", format_eur(predicted_val))
-    d2.metric("Proposed Price", format_eur(proposed_price))
-    d3.metric("Difference vs Model", format_eur(diff))
-    d4.metric("Deal Score", f"{score}/100" if pd.notna(score) else "N/A")
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Predicted Value", format_eur(predicted_val))
+        d2.metric("Proposed Price", format_eur(proposed_price))
+        d3.metric("Difference vs Model", format_eur(diff))
+        d4.metric("Deal Score", f"{score}/100" if pd.notna(score) else "N/A")
 
-    st.subheader("Assessment")
-    st.write(f"**Rating:** {deal_label(score)}")
+        st.subheader("Assessment")
+        st.write(f"**Rating:** {deal_label(score)}")
 
-    if pd.notna(pct):
-        if pct > 0:
-            st.write(f"The proposed fee is **{pct:.2f}% below** the modelled value, which suggests a relatively favourable deal.")
-        elif pct < 0:
-            st.write(f"The proposed fee is **{abs(pct):.2f}% above** the modelled value, which suggests an overpay relative to the model.")
-        else:
-            st.write("The proposed fee is exactly aligned with the modelled value.")
+        if pd.notna(pct):
+            if pct > 0:
+                st.write(f"The proposed fee is **{pct:.2f}% below** the modelled value, which suggests a relatively favourable deal.")
+            elif pct < 0:
+                st.write(f"The proposed fee is **{abs(pct):.2f}% above** the modelled value, which suggests an overpay relative to the model.")
+            else:
+                st.write("The proposed fee is exactly aligned with the modelled value.")
 
 # ============================================================
 # TAB 3: MARKET INEFFICIENCIES
@@ -713,7 +883,7 @@ with tabs[2]:
                     ["player_name", "position_group", "club_name", "club_league_name",
                      "actual_value", "predicted_value_mean", "percentage_diff"]
                 ),
-                use_container_width=True
+                width="stretch"
             )
 
         with col2:
@@ -725,7 +895,7 @@ with tabs[2]:
                     ["player_name", "position_group", "club_name", "club_league_name",
                      "actual_value", "predicted_value_mean", "percentage_diff"]
                 ),
-                use_container_width=True
+                width="stretch"
             )
 
         st.subheader("League-Based Market Inefficiencies")
@@ -743,7 +913,7 @@ with tabs[2]:
                 .sort_values("avg_pct_diff", ascending=False)
             )
 
-            st.dataframe(league_summary, use_container_width=True)
+            st.dataframe(league_summary, width="stretch")
 
             if not league_summary.empty:
                 top_under = league_summary.iloc[0]
@@ -767,7 +937,7 @@ with tabs[2]:
                 orientation="h",
                 title="Average Percentage Difference by League"
             )
-            st.plotly_chart(fig_league, use_container_width=True)
+            st.plotly_chart(fig_league, width="stretch")
 
 # ============================================================
 # TAB 4: UNCERTAINTY
@@ -791,7 +961,7 @@ with tabs[3]:
             title="Predicted Value vs Prediction Uncertainty",
             height=700
         )
-        st.plotly_chart(fig_uncertainty_scatter, use_container_width=True)
+        st.plotly_chart(fig_uncertainty_scatter, width="stretch")
 
         fig_uncertainty_hist = px.histogram(
             filtered_df,
@@ -799,7 +969,7 @@ with tabs[3]:
             nbins=40,
             title="Distribution of Prediction Uncertainty"
         )
-        st.plotly_chart(fig_uncertainty_hist, use_container_width=True)
+        st.plotly_chart(fig_uncertainty_hist, width="stretch")
     else:
         st.info("predicted_value_std is not available.")
 
@@ -827,7 +997,7 @@ with tabs[4]:
             hover_data=["player_name", "club_name", "club_league_name"],
             title="Actual vs Predicted Player Values"
         )
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
 
     if "percentage_diff" in filtered_df.columns:
         error_by_position = (
@@ -841,7 +1011,7 @@ with tabs[4]:
             y="percentage_diff",
             title="Average Percentage Difference by Position"
         )
-        st.plotly_chart(fig_pos, use_container_width=True)
+        st.plotly_chart(fig_pos, width="stretch")
 
     if "club_league_name" in filtered_df.columns and "percentage_diff" in filtered_df.columns:
         league_view = (
@@ -854,7 +1024,7 @@ with tabs[4]:
             .sort_values("avg_pct_diff", ascending=False)
         )
         st.subheader("League-Level View")
-        st.dataframe(league_view, use_container_width=True)
+        st.dataframe(league_view, width="stretch")
 
     if shap_df is not None and not shap_df.empty:
         st.subheader("Top SHAP Features")
@@ -871,7 +1041,7 @@ with tabs[4]:
                 orientation="h",
                 title="Top 20 Features by Mean SHAP Importance"
             )
-            st.plotly_chart(fig_shap, use_container_width=True)
+            st.plotly_chart(fig_shap, width="stretch")
 
 # ============================================================
 # TAB 6: MODEL METRICS
@@ -900,14 +1070,47 @@ with tabs[5]:
                 "min": vals.get("min"),
                 "max": vals.get("max")
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch")
     elif metrics_csv is not None:
-        st.dataframe(metrics_csv, use_container_width=True)
+        st.dataframe(metrics_csv, width="stretch")
     else:
         st.info("No metrics summary file found.")
 
     st.subheader("All Runs Metrics")
     if all_runs_metrics is not None:
-        st.dataframe(all_runs_metrics, use_container_width=True)
+        st.dataframe(all_runs_metrics, width="stretch")
     else:
         st.info("No all_runs_metrics.csv file found.")
+
+    st.subheader("Experiment History")
+    st.write(
+        "Headline metrics recorded each time the model is run, so performance "
+        "can be compared over time."
+    )
+    exp_history = safe_read_csv(EXPERIMENT_LOG_FILE)
+    if exp_history is None or exp_history.empty:
+        st.info(
+            "No experiments logged yet. After a model run, record one with "
+            "`python scripts/experiment_tracker.py log --readme`."
+        )
+    else:
+        st.caption(f"{len(exp_history):,} logged experiment(s) — all-time averages:")
+        a1, a2, a3, a4 = st.columns(4)
+        if "R2" in exp_history.columns:
+            a1.metric("Avg R²", f"{pd.to_numeric(exp_history['R2'], errors='coerce').mean():.3f}")
+        if "MAE" in exp_history.columns:
+            a2.metric("Avg MAE", format_eur(pd.to_numeric(exp_history["MAE"], errors="coerce").mean()))
+        if "RMSE" in exp_history.columns:
+            a3.metric("Avg RMSE", format_eur(pd.to_numeric(exp_history["RMSE"], errors="coerce").mean()))
+        if "Accuracy@20%" in exp_history.columns:
+            a4.metric("Avg Acc@20%", f"{pd.to_numeric(exp_history['Accuracy@20%'], errors='coerce').mean():.1f}%")
+
+        for metric in ["R2", "MAE"]:
+            if "experiment_id" in exp_history.columns and metric in exp_history.columns:
+                fig_hist = px.line(
+                    exp_history, x="experiment_id", y=metric, markers=True,
+                    title=f"{metric} across experiments"
+                )
+                st.plotly_chart(fig_hist, width="stretch")
+
+        st.dataframe(exp_history, width="stretch")
