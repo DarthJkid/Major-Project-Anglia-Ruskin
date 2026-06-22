@@ -138,7 +138,7 @@ daily, or manually from the Actions tab). It retrains, logs the experiment,
 promotes the best run, refreshes the README, and commits the results back —
 which triggers a Streamlit Cloud redeploy.
 
-The orchestration lives in [`scripts/run_pipeline.py`](scripts/run_pipeline.py).
-**Before the workflow can train**, port your modelling code from
-`scripts/notebooks/` into that file's `train_model()` (it must write the output
-files into `data/`). Training dependencies are in `requirements-train.txt`.
+The full modelling pipeline lives in [`scripts/run_pipeline.py`](scripts/run_pipeline.py)
+— a hybrid CatBoost + LightGBM + XGBoost + MLPRegressor ensemble that writes its
+outputs into `data/`. Training dependencies are in `requirements-train.txt`. Run
+it manually with `python scripts/run_pipeline.py --notes "manual run"`.

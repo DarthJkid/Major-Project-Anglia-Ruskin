@@ -28,3 +28,7 @@ Thumbs.db
 
 # ---- Scraper artifacts ----
 *.log
+
+# ---- Large intermediate model outputs (not used by the app) ----
+data/all_runs_predictions_long.csv
+data/all_runs_predictions_wide.csv
