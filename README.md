@@ -27,17 +27,17 @@ The table below is generated from the experiment history and refreshes whenever
 a new run is logged (see [Experiment tracking](#experiment-tracking)).
 
 <!-- EXPERIMENT_METRICS:START -->
-Averaged across **3** logged experiment(s) (last updated 2026-06-22):
+Averaged across **4** logged experiment(s) (last updated 2026-06-23):
 
 | Metric | All-time avg | Latest | Best |
 | --- | --- | --- | --- |
-| R² | 0.942 | 0.940 | 0.947 |
-| RMSE | €2.62M | €2.69M | €2.49M |
+| R² | 0.941 | 0.940 | 0.947 |
+| RMSE | €2.64M | €2.69M | €2.49M |
 | MAE | €1.00M | €1.00M | €1.00M |
-| Accuracy @ 10% | 30.4% | 30.8% | 30.8% |
-| Accuracy @ 20% | 55.4% | 55.9% | 55.9% |
-| MAPE | 22.6% | 22.3% | 22.3% |
-| Mean % error | +3.22% | +3.08% | +3.08% |
+| Accuracy @ 10% | 30.5% | 30.8% | 30.8% |
+| Accuracy @ 20% | 55.5% | 55.9% | 55.9% |
+| MAPE | 22.5% | 22.3% | 22.3% |
+| Mean % error | +3.19% | +3.08% | +3.08% |
 <!-- EXPERIMENT_METRICS:END -->
 
 The final estimate is a hybrid (stacked) model that combines a gradient-boosted
