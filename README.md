@@ -27,7 +27,7 @@ The table below is generated from the experiment history and refreshes whenever
 a new run is logged (see [Experiment tracking](#experiment-tracking)).
 
 <!-- EXPERIMENT_METRICS:START -->
-Averaged across **18** logged experiment(s) (last updated 2026-07-08):
+Averaged across **19** logged experiment(s) (last updated 2026-07-09):
 
 | Metric | All-time avg | Latest | Best |
 | --- | --- | --- | --- |
@@ -36,7 +36,7 @@ Averaged across **18** logged experiment(s) (last updated 2026-07-08):
 | MAE | €1.00M | €1.00M | €1.00M |
 | Accuracy @ 10% | 30.7% | 30.8% | 30.8% |
 | Accuracy @ 20% | 55.8% | 55.9% | 55.9% |
-| MAPE | 22.4% | 22.3% | 22.3% |
+| MAPE | 22.3% | 22.3% | 22.3% |
 | Mean % error | +3.11% | +3.08% | +3.08% |
 <!-- EXPERIMENT_METRICS:END -->
 
