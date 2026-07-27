@@ -27,7 +27,7 @@ The table below is generated from the experiment history and refreshes whenever
 a new run is logged (see [Experiment tracking](#experiment-tracking)).
 
 <!-- EXPERIMENT_METRICS:START -->
-Averaged across **36** logged experiment(s) (last updated 2026-07-26):
+Averaged across **37** logged experiment(s) (last updated 2026-07-27):
 
 | Metric | All-time avg | Latest | Best |
 | --- | --- | --- | --- |
@@ -37,7 +37,7 @@ Averaged across **36** logged experiment(s) (last updated 2026-07-26):
 | Accuracy @ 10% | 30.7% | 30.8% | 30.8% |
 | Accuracy @ 20% | 55.9% | 55.9% | 55.9% |
 | MAPE | 22.3% | 22.3% | 22.3% |
-| Mean % error | +3.10% | +3.08% | +3.08% |
+| Mean % error | +3.09% | +3.08% | +3.08% |
 <!-- EXPERIMENT_METRICS:END -->
 
 The final estimate is a hybrid (stacked) model that combines a gradient-boosted
