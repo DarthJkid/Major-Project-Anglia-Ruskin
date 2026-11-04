@@ -27,7 +27,7 @@ The table below is generated from the experiment history and refreshes whenever
 a new run is logged (see [Experiment tracking](#experiment-tracking)).
 
 <!-- EXPERIMENT_METRICS:START -->
-Averaged across **136** logged experiment(s) (last updated 2026-11-03):
+Averaged across **137** logged experiment(s) (last updated 2026-11-04):
 
 | Metric | All-time avg | Latest | Best |
 | --- | --- | --- | --- |
